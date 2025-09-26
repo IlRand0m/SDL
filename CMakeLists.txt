@@ -80,6 +80,12 @@ include("${SDL3_SOURCE_DIR}/cmake/PreseedNokiaNGageCache.cmake")
 
 SDL_DetectCompiler()
 SDL_DetectTargetCPUArchitectures(SDL_CPUS)
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _num_arches)
+  if(_num_arches GREATER 1)
+    set(APPLE_MULTIARCH TRUE)
+  endif()
+endif()
 
 # Increment this if there is an incompatible change - but if that happens,
 # we should rename the library from SDL3 to SDL4, at which point this would
@@ -253,6 +259,7 @@ define_sdl_subsystem(Hidapi)
 define_sdl_subsystem(Power)
 define_sdl_subsystem(Sensor)
 define_sdl_subsystem(Dialog)
+define_sdl_subsystem(Tray)
 
 cmake_dependent_option(SDL_FRAMEWORK "Build SDL libraries as Apple Framework" OFF "APPLE" OFF)
 if(SDL_FRAMEWORK)
@@ -301,6 +308,7 @@ dep_option(SDL_ARMNEON             "Use NEON assembly routines" ON "SDL_ASSEMBLY
 dep_option(SDL_LSX                 "Use LSX assembly routines" ON "SDL_ASSEMBLY;SDL_CPU_LOONGARCH64" OFF)
 dep_option(SDL_LASX                "Use LASX assembly routines" ON "SDL_ASSEMBLY;SDL_CPU_LOONGARCH64" OFF)
 
+dep_option(SDL_DLOPEN_NOTES        "Record dlopen dependencies in .note.dlopen section" TRUE UNIX_SYS OFF)
 set_option(SDL_LIBC                "Use the system C library" ${SDL_LIBC_DEFAULT})
 set_option(SDL_SYSTEM_ICONV        "Use iconv() from system-installed libraries" ${SDL_SYSTEM_ICONV_DEFAULT})
 set_option(SDL_LIBICONV            "Prefer iconv() from libiconv, if available, over libc version" OFF)
@@ -352,7 +360,7 @@ dep_option(SDL_WASAPI              "Use the Windows WASAPI audio driver" ON "WIN
 dep_option(SDL_RENDER_D3D          "Enable the Direct3D 9 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
 dep_option(SDL_RENDER_D3D11        "Enable the Direct3D 11 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
 dep_option(SDL_RENDER_D3D12        "Enable the Direct3D 12 render driver" ON "SDL_RENDER;SDL_DIRECTX" OFF)
-dep_option(SDL_RENDER_METAL        "Enable the Metal render driver" ON "SDL_RENDER;${APPLE}" OFF)
+dep_option(SDL_RENDER_METAL        "Enable the Metal render driver" ON "SDL_RENDER;APPLE" OFF)
 dep_option(SDL_RENDER_GPU          "Enable the SDL_GPU render driver" ON "SDL_RENDER;SDL_GPU" OFF)
 dep_option(SDL_VIVANTE             "Use Vivante EGL video driver" ON "${UNIX_SYS};SDL_CPU_ARM32" OFF)
 dep_option(SDL_VULKAN              "Enable Vulkan support" ON "SDL_VIDEO;ANDROID OR APPLE OR LINUX OR FREEBSD OR WINDOWS" OFF)
@@ -374,7 +382,6 @@ set_option(SDL_LIBUDEV             "Enable libudev support" ON)
 set_option(SDL_ASAN                "Use AddressSanitizer to detect memory errors" OFF)
 set_option(SDL_CCACHE              "Use Ccache to speed up build" OFF)
 set_option(SDL_CLANG_TIDY          "Run clang-tidy static analysis" OFF)
-set_option(SDL_GPU_DXVK            "Build SDL_GPU with DXVK support" OFF)
 
 set(SDL_VENDOR_INFO "" CACHE STRING "Vendor name and/or version to add to SDL_REVISION")
 
@@ -410,6 +417,7 @@ if (NGAGE)
   set(SDL_DUMMYVIDEO       OFF)
   set(SDL_OFFSCREEN        OFF)
   set(SDL_RENDER_GPU       OFF)
+  set(SDL_TRAY             OFF)
   set(SDL_VIRTUAL_JOYSTICK OFF)
 endif()
 
@@ -448,6 +456,7 @@ if(SDL_SHARED)
   add_library(SDL3-shared SHARED)
   add_library(SDL3::SDL3-shared ALIAS SDL3-shared)
   SDL_AddCommonCompilerFlags(SDL3-shared)
+  target_compile_definitions(SDL3-shared PRIVATE "$<$<CONFIG:Debug>:DEBUG>")
   set_property(TARGET SDL3-shared PROPERTY UNITY_BUILD OFF)
   if ("c_std_99" IN_LIST CMAKE_C_COMPILE_FEATURES)
     target_compile_features(SDL3-shared PRIVATE c_std_99)
@@ -460,6 +469,7 @@ if(SDL_STATIC)
   add_library(SDL3-static STATIC)
   add_library(SDL3::SDL3-static ALIAS SDL3-static)
   SDL_AddCommonCompilerFlags(SDL3-static)
+  target_compile_definitions(SDL3-static PRIVATE "$<$<CONFIG:Debug>:DEBUG>")
   set_property(TARGET SDL3-static PROPERTY UNITY_BUILD OFF)
   if ("c_std_99" IN_LIST CMAKE_C_COMPILE_FEATURES)
     target_compile_features(SDL3-static PRIVATE c_std_99)
@@ -472,6 +482,7 @@ if(SDL_TEST_LIBRARY)
   add_library(SDL3_test STATIC)
   add_library(SDL3::SDL3_test ALIAS SDL3_test)
   SDL_AddCommonCompilerFlags(SDL3_test)
+  target_compile_definitions(SDL3_test PRIVATE "$<$<CONFIG:Debug>:DEBUG>")
 endif()
 
 # Make sure SDL3::SDL3 always exists
@@ -629,6 +640,10 @@ if(USE_GCC OR USE_CLANG OR USE_INTELCC OR USE_QCC)
     if(COMPILER_SUPPORTS_WNO_ERROR_DEPRECATED_DECLARATIONS)
       sdl_compile_options(PRIVATE "-Wno-error=deprecated-declarations")
     endif()
+    check_c_compiler_flag(-Wno-deprecated-declarations COMPILER_SUPPORTS_WNO_DEPRECATED_DECLARATIONS)
+    if(COMPILER_SUPPORTS_WNO_DEPRECATED_DECLARATIONS)
+      sdl_compile_options(PRIVATE "-Wno-deprecated-declarations")
+    endif()
   endif()
 
   if(APPLE)
@@ -680,7 +695,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -mmmx")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <mmintrin.h>
       void ints_add(int *dest, int *a, int *b, unsigned size) {
         for (; size >= 2; size -= 2, dest += 2, a += 2, b += 2) {
@@ -690,7 +705,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char *argv[]) {
         ints_add((int*)0, (int*)0, (int*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_MMX)
+      }]==] COMPILER_SUPPORTS_MMX)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_MMX)
       set(HAVE_MMX TRUE)
@@ -701,7 +716,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -msse")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <xmmintrin.h>
       void floats_add(float *dest, float *a, float *b, unsigned size) {
         for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
@@ -711,7 +726,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         floats_add((float*)0, (float*)0, (float*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_SSE)
+      }]==] COMPILER_SUPPORTS_SSE)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_SSE)
       set(HAVE_SSE TRUE)
@@ -722,7 +737,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -msse2")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <emmintrin.h>
       void doubles_add(double *dest, double *a, double *b, unsigned size) {
         for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
@@ -732,7 +747,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         doubles_add((double*)0, (double*)0, (double*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_SSE2)
+      }]==] COMPILER_SUPPORTS_SSE2)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_SSE2)
       set(HAVE_SSE2 TRUE)
@@ -743,7 +758,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -msse3")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <pmmintrin.h>
       void ints_add(int *dest, int *a, int *b, unsigned size) {
         for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
@@ -753,7 +768,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         ints_add((int*)0, (int*)0, (int*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_SSE3)
+      }]==] COMPILER_SUPPORTS_SSE3)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_SSE3)
       set(HAVE_SSE3 TRUE)
@@ -764,7 +779,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -msse4.1")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <smmintrin.h>
       void ints_mul(int *dest, int *a, int *b, unsigned size) {
         for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
@@ -774,7 +789,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         ints_mul((int*)0, (int*)0, (int*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_SSE4_1)
+      }]==] COMPILER_SUPPORTS_SSE4_1)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_SSE4_1)
       set(HAVE_SSE4_1 TRUE)
@@ -783,21 +798,16 @@ if(SDL_ASSEMBLY)
   if(SDL_SSE4_2)
     cmake_push_check_state()
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
-      string(APPEND CMAKE_REQUIRED_FLAGS " -msse4.2 -mcrc32")
+      string(APPEND CMAKE_REQUIRED_FLAGS " -msse4.2")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <nmmintrin.h>
-      unsigned calc_crc32c(const char *text, unsigned len) {
-          unsigned crc32c = ~0;
-          for (; len >= 4; len -= 4, text += 4) {
-            crc32c = (unsigned)_mm_crc32_u32(crc32c, *(unsigned*)text);
-          }
-          return crc32c;
-      }
+      __m128i bitmask;
+      char data[16];
       int main(int argc, char **argv) {
-        calc_crc32c(\"SDL_SSE4\",8);
+        bitmask = _mm_cmpgt_epi64(_mm_set1_epi64x(0), _mm_loadu_si128((void*)data));
         return 0;
-      }" COMPILER_SUPPORTS_SSE4_2)
+      }]==] COMPILER_SUPPORTS_SSE4_2)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_SSE4_2)
       set(HAVE_SSE4_2 TRUE)
@@ -808,7 +818,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -mavx")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <immintrin.h>
       void floats_add(float *dest, float *a, float *b, unsigned size) {
         for (; size >= 8; size -= 8, dest += 8, a += 8, b += 8) {
@@ -818,7 +828,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         floats_add((float*)0, (float*)0, (float*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_AVX)
+      }]==] COMPILER_SUPPORTS_AVX)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_AVX)
       set(HAVE_AVX TRUE)
@@ -829,7 +839,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -mavx2")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <immintrin.h>
       void ints_add(int *dest, int *a, int *b, unsigned size) {
         for (; size >= 8; size -= 8, dest += 8, a += 8, b += 8) {
@@ -839,7 +849,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         ints_add((int*)0, (int*)0, (int*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_AVX2)
+      }]==] COMPILER_SUPPORTS_AVX2)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_AVX2)
       set(HAVE_AVX2 TRUE)
@@ -850,7 +860,7 @@ if(SDL_ASSEMBLY)
     if(USE_GCC OR USE_CLANG OR USE_INTELCC)
       string(APPEND CMAKE_REQUIRED_FLAGS " -mavx512f")
     endif()
-    check_c_source_compiles("
+    check_x86_source_compiles([==[
       #include <immintrin.h>
       void floats_add(float *dest, float *a, float *b, unsigned size) {
         for (; size >= 16; size -= 16, dest += 16, a += 16, b += 16) {
@@ -860,7 +870,7 @@ if(SDL_ASSEMBLY)
       int main(int argc, char **argv) {
         floats_add((float*)0, (float*)0, (float*)0, 0);
         return 0;
-      }" COMPILER_SUPPORTS_AVX512F)
+      }]==] COMPILER_SUPPORTS_AVX512F)
     cmake_pop_check_state()
     if(COMPILER_SUPPORTS_AVX512F)
       set(HAVE_AVX512F TRUE)
@@ -868,18 +878,17 @@ if(SDL_ASSEMBLY)
   endif()
 
   if(SDL_ARMNEON)
-    check_c_source_compiles("
-        #include <arm_neon.h>
-        void floats_add(float *dest, float *a, float *b, unsigned size) {
-          for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
-            vst1q_f32(dest, vaddq_f32(vld1q_f32(a), vld1q_f32(b)));
-          }
+    check_arm_source_compiles([==[
+      #include <arm_neon.h>
+      void floats_add(float *dest, float *a, float *b, unsigned size) {
+        for (; size >= 4; size -= 4, dest += 4, a += 4, b += 4) {
+          vst1q_f32(dest, vaddq_f32(vld1q_f32(a), vld1q_f32(b)));
         }
-        int main(int argc, char *argv[]) {
-          floats_add((float*)0, (float*)0, (float*)0, 0);
-          return 0;
-         }" COMPILER_SUPPORTS_ARMNEON)
-
+      }
+      int main(int argc, char *argv[]) {
+        floats_add((float*)0, (float*)0, (float*)0, 0);
+        return 0;
+      }]==] COMPILER_SUPPORTS_ARMNEON)
     if(COMPILER_SUPPORTS_ARMNEON)
       set(HAVE_ARMNEON TRUE)
     endif()
@@ -1082,8 +1091,10 @@ if(SDL_LIBC)
   cmake_push_check_state()
   if(MSVC)
     string(APPEND CMAKE_REQUIRED_FLAGS " -we4244 -WX")  # 'conversion' conversion from 'type1' to 'type2', possible loss of data
-  else()
+  elseif(HAVE_GCC_WFLOAT_CONVERSION)
     string(APPEND CMAKE_REQUIRED_FLAGS " -Wfloat-conversion -Werror")
+  else()
+    string(APPEND CMAKE_REQUIRED_FLAGS " -Wconversion -Werror")
   endif()
   foreach(math_fn isinf isnan)
     string(TOUPPER "${math_fn}" MATH_FN)
@@ -1121,6 +1132,7 @@ if(SDL_LIBC)
     check_symbol_exists(gethostname "unistd.h" HAVE_GETHOSTNAME)
     check_symbol_exists(getpagesize "unistd.h" HAVE_GETPAGESIZE)
     check_symbol_exists(sigaction "signal.h" HAVE_SIGACTION)
+    check_symbol_exists(sigtimedwait "signal.h" HAVE_SIGTIMEDWAIT)
     check_symbol_exists(setjmp "setjmp.h" HAVE_SETJMP)
     check_symbol_exists(nanosleep "time.h" HAVE_NANOSLEEP)
     check_symbol_exists(gmtime_r "time.h" HAVE_GMTIME_R)
@@ -1258,6 +1270,7 @@ target_include_directories(SDL_uclibc PRIVATE "${SDL3_BINARY_DIR}/include-config
 target_include_directories(SDL_uclibc PRIVATE "${SDL3_SOURCE_DIR}/src")
 target_include_directories(SDL_uclibc PRIVATE "${SDL3_SOURCE_DIR}/include")
 SDL_AddCommonCompilerFlags(SDL_uclibc)
+target_compile_definitions(SDL_uclibc PRIVATE "$<$<CONFIG:Debug>:DEBUG>")
 sdl_sources(STATIC "$<TARGET_OBJECTS:SDL_uclibc>")
 set_property(TARGET SDL_uclibc PROPERTY UNITY_BUILD OFF)
 if(TARGET SDL3-shared)
@@ -1710,6 +1723,25 @@ elseif(EMSCRIPTEN)
   CheckLibUnwind()
 
 elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+
+  if(SDL_DLOPEN_NOTES)
+    set(CHECK_ELF_DLNOTES_SRC [==[
+    #ifndef __ELF__
+      ELF DL notes is only supported on ELF platforms
+    #endif
+    __attribute__ ((used,aligned(4),section(".note.dlopen"))) static const struct {
+      struct { int a; int b; int c; } hdr; char name[4]; __attribute__((aligned(4))) char json[24];
+    } dlnote = { { 4, 0x407c0c0aU, 16 }, "FDO", "[\\"a\\":{\\"a\\":\\"1\\",\\"b\\":\\"2\\"}]" };
+    int main(int argc, char *argv[]) {
+      return argc + dlnote.hdr.a;
+    }
+    ]==])
+    check_c_source_compiles("${CHECK_ELF_DLNOTES_SRC}" COMPILER_SUPPORTS_ELFNOTES)
+    if(COMPILER_SUPPORTS_ELFNOTES)
+      set(HAVE_DLOPEN_NOTES TRUE)
+    endif()
+  endif()
+
   if(SDL_AUDIO)
     if(NETBSD)
         set(SDL_AUDIO_DRIVER_NETBSD 1)
@@ -1752,7 +1784,9 @@ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
     CheckVivante()
     CheckVulkan()
     CheckQNXScreen()
+  endif()
 
+  if(SDL_TRAY)
     sdl_glob_sources(
       "${SDL3_SOURCE_DIR}/src/tray/unix/*.c"
       "${SDL3_SOURCE_DIR}/src/tray/unix/*.h"
@@ -1962,16 +1996,6 @@ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
       )
     endif()
 
-    if(SDL_GPU AND SDL_GPU_DXVK)
-      if(PKG_CONFIG_FOUND)
-        pkg_search_module(DXVK_NATIVE dxvk-dxgi)
-        if(DXVK_NATIVE_FOUND)
-          set(HAVE_D3D11_H TRUE)
-          sdl_include_directories(PRIVATE SYSTEM ${DXVK_NATIVE_INCLUDE_DIRS})
-        endif()
-      endif()
-    endif()
-
     if(HAVE_LIBURING_H)
       sdl_sources("${SDL3_SOURCE_DIR}/src/io/io_uring/SDL_asyncio_liburing.c")
     endif()
@@ -2145,7 +2169,7 @@ elseif(WINDOWS)
         else()
           set(PROCESSOR_ARCH "x86")
         endif()
-        sdl_link_directories("$<BUILD_INTERFACE:$$ENV{DXSDK_DIR}\\lib\\${PROCESSOR_ARCH}>")
+        sdl_link_directories("$<BUILD_INTERFACE:$ENV{DXSDK_DIR}\\lib\\${PROCESSOR_ARCH}>")
         sdl_include_directories(PRIVATE SYSTEM "$<BUILD_INTERFACE:$ENV{DXSDK_DIR}\\Include>")
       endif()
     endif()
@@ -2156,7 +2180,8 @@ elseif(WINDOWS)
     check_c_source_compiles("
       #include <windows.h>
       #include <xinput.h>
-      int main(int argc, char **argv) { return 0; }" HAVE_XINPUT_H)
+      int main(int argc, char **argv) { return 0; }" HAVE_XINPUT_H
+    )
   endif()
 
   # headers needed elsewhere
@@ -2172,6 +2197,7 @@ elseif(WINDOWS)
     #include <gameinput.h>
     int main(int argc, char **argv) { return 0; }" HAVE_GAMEINPUT_H
   )
+  check_include_file(dxgi1_5.h HAVE_DXGI1_5_H)
   check_include_file(dxgi1_6.h HAVE_DXGI1_6_H)
   check_include_file(tpcshrd.h HAVE_TPCSHRD_H)
   check_include_file(roapi.h HAVE_ROAPI_H)
@@ -2184,6 +2210,7 @@ elseif(WINDOWS)
     #include <mfapi.h>
     #include <mfidl.h>
     #include <mfreadwrite.h>
+    static MFVideoPrimaries primaries = MFVideoPrimaries_DCI_P3;
     int main(int argc, char **argv) { return 0; }
     " HAVE_MFAPI_H
   )
@@ -2227,7 +2254,7 @@ elseif(WINDOWS)
       set(SDL_VIDEO_RENDER_D3D11 1)
       set(HAVE_RENDER_D3D11 TRUE)
     endif()
-    if(SDL_RENDER_D3D12)
+    if(SDL_RENDER_D3D12 AND HAVE_DXGI1_6_H)
       set(SDL_VIDEO_RENDER_D3D12 1)
       set(HAVE_RENDER_D3D12 TRUE)
     endif()
@@ -2329,7 +2356,9 @@ elseif(WINDOWS)
         set(HAVE_RENDER_VULKAN TRUE)
       endif()
     endif()
+  endif()
 
+  if(SDL_TRAY)
     sdl_glob_sources("${SDL3_SOURCE_DIR}/src/tray/windows/*.c")
     set(HAVE_SDL_TRAY TRUE)
   endif()
@@ -2576,6 +2605,7 @@ elseif(APPLE)
       set(SDL_FRAMEWORK_UIKIT 1)
       set(SDL_IPHONE_KEYBOARD 1)
       set(SDL_IPHONE_LAUNCHSCREEN 1)
+      set(SDL_FRAMEWORK_GAMECONTROLLER 1)
       sdl_glob_sources(
         "${SDL3_SOURCE_DIR}/src/video/uikit/*.m"
         "${SDL3_SOURCE_DIR}/src/video/uikit/*.h"
@@ -2645,11 +2675,11 @@ elseif(APPLE)
         endif()
       endif()
     endif()
+  endif()
 
-    if(MACOS)
-      sdl_glob_sources("${SDL3_SOURCE_DIR}/src/tray/cocoa/*.m")
-      set(HAVE_SDL_TRAY TRUE)
-    endif()
+  if(SDL_TRAY AND MACOS)
+    sdl_glob_sources("${SDL3_SOURCE_DIR}/src/tray/cocoa/*.m")
+    set(HAVE_SDL_TRAY TRUE)
   endif()
 
   # Minimum version for $<LINK_LIBRARY:feature,library-list>
@@ -3359,6 +3389,10 @@ if (SDL_DIALOG)
     set(HAVE_SDL_DIALOG TRUE)
   endif()
 endif()
+if(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+  sdl_sources(${SDL3_SOURCE_DIR}/src/dialog/unix/SDL_zenitymessagebox.h)
+  sdl_sources(${SDL3_SOURCE_DIR}/src/dialog/unix/SDL_zenitymessagebox.c)
+endif()
 
 sdl_sources("${SDL3_SOURCE_DIR}/src/process/SDL_process.c")
 if(WINDOWS)
@@ -3368,7 +3402,7 @@ if(WINDOWS)
   )
   set(SDL_PROCESS_WINDOWS 1)
   set(HAVE_SDL_PROCESS TRUE)
-else()
+elseif(NOT ANDROID)
   check_c_source_compiles("
 #include <spawn.h>
 #include <unistd.h>
@@ -3432,15 +3466,7 @@ endif()
 sdl_glob_sources(${SDL3_SOURCE_DIR}/src/tray/*.c)
 
 if(SDL_GPU)
-  if(HAVE_D3D11_H)
-    sdl_glob_sources(
-      "${SDL3_SOURCE_DIR}/src/gpu/d3d11/*.c"
-      "${SDL3_SOURCE_DIR}/src/gpu/d3d11/*.h"
-    )
-    set(SDL_GPU_D3D11 1)
-    set(HAVE_SDL_GPU TRUE)
-  endif()
-  if(WINDOWS)
+  if(HAVE_DXGI1_6_H)
     sdl_glob_sources(
       "${SDL3_SOURCE_DIR}/src/gpu/d3d12/*.c"
       "${SDL3_SOURCE_DIR}/src/gpu/d3d12/*.h"
@@ -3456,7 +3482,7 @@ if(SDL_GPU)
     set(SDL_GPU_VULKAN 1)
     set(HAVE_SDL_GPU TRUE)
   endif()
-  if(SDL_RENDER_GPU)
+  if(SDL_RENDER_GPU AND HAVE_SDL_GPU)
     set(SDL_VIDEO_RENDER_GPU 1)
     set(HAVE_RENDER_GPU TRUE)
   endif()
@@ -4240,6 +4266,7 @@ endif()
 ##### Uninstall target #####
 
 if(SDL_UNINSTALL)
+  set(HAVE_UNINSTALL ON)
   if(NOT TARGET uninstall)
     configure_file(cmake/cmake_uninstall.cmake.in cmake_uninstall.cmake IMMEDIATE @ONLY)
 
